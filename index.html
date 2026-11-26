@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fire Zone AR Demo</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#101719;color:#f5f7f5}
+*{box-sizing:border-box}
+body{margin:0}
+main{max-width:1100px;margin:auto;padding:clamp(16px,4vw,44px)}
+header,.controls{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px}
+h1{font-size:clamp(1.6rem,4vw,2.5rem);margin:0}
+button{font:inherit;color:inherit;background:#253238;border:1px solid #647178;border-radius:10px;padding:10px 14px;cursor:pointer}
+button:focus-visible{outline:3px solid #fff;outline-offset:3px}
+button:disabled{opacity:.6;cursor:wait}
+#camera,#action{background:#e8f4eb;color:#102019;font-weight:700}
+#status{min-height:1.5em;color:#bdcbc9;margin:12px 0}
+.stage{position:relative;isolation:isolate;overflow:hidden;min-height:350px;height:min(58vh,540px);border-radius:16px;background:#263c40}
+canvas,video{position:absolute;width:100%;height:100%;inset:0;object-fit:cover;z-index:-2}
+.stage::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:-1;background:linear-gradient(transparent 65%,#0007)}
+canvas{object-fit:fill}
+[hidden]{display:none!important}
+.marker{position:absolute;transform:translate(-50%,-50%);background:#24191aee;border-color:#ff8c80;text-align:left;box-shadow:0 6px 24px #0008;width:max-content;max-width:44%;min-width:100px}
+.marker small{display:block;color:#ffaaa0;font-size:.84rem}
+.marker.ignition{background:#292117ee;border-color:#ffc37e}
+.marker.ignition small{color:#ffd49d}
+.marker[aria-pressed=true]{outline:2px solid #fff;outline-offset:4px}
+.marker:disabled{opacity:1}
+#target{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);width:max-content;max-width:calc(100% - 24px);padding:8px 12px;background:#111e;border-radius:8px;text-align:center}
+.panel{background:#1a2528;border-radius:14px;margin-top:14px;padding:16px 18px}
+h2{margin:0;font-size:1.25rem}
+p{line-height:1.45}
+.panel p{margin:6px 0 0;color:#d0dad8}
+#drone{position:absolute;left:49%;top:87%;transform:translate(-50%,-50%);padding:5px 8px;background:#142427;border:1px solid #91e4cf;border-radius:8px;color:#c7fff0;pointer-events:none;transition:left 2s linear,top 2s linear;white-space:nowrap}
+#thermal{margin-top:14px;background:#1a2528;border-radius:14px;padding:16px 18px}
+#heatmap{height:140px;margin-top:12px;border-radius:8px;background:radial-gradient(ellipse at var(--hotspot) 52%,#fff8b0 0%,#ffb93d 8%,#da3b51 20%,#6d247b 38%,#281756 62%,#13112e 85%)}
+#heatmap.warm{background:radial-gradient(ellipse at var(--hotspot) 52%,#e38658 0%,#a14169 7%,#613279 19%,#291956 42%,#13112e 74%)}
+#heatmap.cool{background:radial-gradient(ellipse at 45% 58%,#422560 0%,#291956 30%,#13112e 80%)}
+.thermal-scale{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:8px;color:#d0dad8;font-size:.85rem}
+.thermal-scale span{width:100px;height:8px;border-radius:4px;background:linear-gradient(90deg,#281756,#6d247b,#da3b51,#ffb93d,#fff8b0)}
+#forecast{font-weight:700}
+@media(prefers-reduced-motion:reduce){#drone{transition:none}}
+footer{margin-top:12px;color:#bdcbc9;font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+<header><h1>Fire Zone AR Demo</h1><button id="camera">Use live camera</button></header>
+<p id="status" role="status">Bird’s-eye forecast · Select a zone to investigate.</p>
+<div class="stage">
+<canvas id="scene" width="1000" height="520" aria-label="Overhead training map with one red zone and two possible ignition zones"></canvas>
+<video id="feed" playsinline muted hidden></video>
+<button class="marker" id="a" aria-pressed="false">Zone A<small>Red zone</small></button>
+<button class="marker ignition" id="b" aria-pressed="false">Zone B<small>Possible ignition</small></button>
+<button class="marker ignition" id="c" aria-pressed="false">Zone C<small>Possible ignition</small></button>
+<div id="drone" aria-hidden="true">Drone</div>
+<div id="target" role="status" hidden></div>
+</div>
+<section class="panel controls" aria-label="Zone details">
+<div><h2 id="zone">Select a forecast zone</h2><p id="forecast" hidden></p><p id="details">Inspect the forecast, then dispatch a drone for a thermal scan.</p></div>
+<button id="action" hidden></button>
+</section>
+<section id="thermal" aria-labelledby="thermal-title" hidden>
+<h2 id="thermal-title">Thermal scan</h2>
+<p id="report" role="status"></p>
+<div id="heatmap" role="img"></div>
+<div class="thermal-scale" aria-label="Relative heat scale">Cooler <span aria-hidden="true"></span> Hotter</div>
+</section>
+<footer>Training simulation. Forecasts, drone flights, and thermal readings are simulated. The camera option shows your device’s surroundings.</footer>
+</main>
+<script>
+const byId = id => document.getElementById(id)
+const canvas = byId('scene')
+const ctx = canvas.getContext('2d')
+const zones = {
+  a: {
+    label: 'Zone A', type: 'Red zone', x: 25, y: 55,
+    forecast: 'Intense fire predicted',
+    description: 'Survey the red zone to see where heat is concentrated.',
+    hotspot: '62%', heat: 'intense',
+    report: 'A broad area of intense heat is visible, with the strongest hotspot on the east side.'
+  },
+  b: {
+    label: 'Zone B', type: 'Possible ignition', x: 75, y: 55,
+    forecast: 'A fire could start soon',
+    description: 'Scan for early signs of heating in the vegetation.',
+    hotspot: '31%', heat: 'warm',
+    report: 'A small warm patch appears on the west side. The scan shows no broad area of intense heat.'
+  },
+  c: {
+    label: 'Zone C', type: 'Possible ignition', x: 50, y: 24,
+    forecast: 'A fire could start soon',
+    description: 'Check whether the predicted ignition area is already heating up.',
+    hotspot: '50%', heat: 'cool',
+    report: 'No distinct hotspot appears in this scan. The forecast still flags this zone for possible ignition.'
+  }
+}
+function drawMap() {
+  const {width, height} = canvas.getBoundingClientRect()
+  if (!width || !height) return
+  const scale = window.devicePixelRatio || 1
+  canvas.width = Math.round(width * scale)
+  canvas.height = Math.round(height * scale)
+  ctx.setTransform(scale,0,0,scale,0,0)
+  const rect = (color,x,y,w,h) => {
+    ctx.fillStyle = color
+    ctx.fillRect(x*width,y*height,w*width,h*height)
+  }
+  rect('#31493d',0,0,1,1)
+  for (let i=1; i<12; i++) rect('#ffffff0d',i/12,0,1/width,1)
+  for (let i=1; i<8; i++) rect('#ffffff0d',0,i/8,1,1/height)
+  rect('#606762',.45,0,.08,1)
+  rect('#606762',0,.75,1,.09)
+  for (let i=0; i<12; i++) rect('#d8d3a180',.489,i/12,.003,.04)
+  for (const [id, zone] of Object.entries(zones)) {
+    const x = zone.x / 100
+    const y = zone.y / 100
+    rect(id === 'a' ? '#692f32' : '#674532',x-.17,y-.13,.34,.26)
+    ctx.strokeStyle = id === 'a' ? '#ff847c' : '#ffc37e'
+    ctx.lineWidth = 2
+    ctx.setLineDash([6,5])
+    ctx.strokeRect((x-.17)*width,(y-.13)*height,.34*width,.26*height)
+    ctx.setLineDash([])
+  }
+  for (let i=0; i<32; i++) {
+    const x = ((i*47+13)%97)/97
+    const y = i%2 ? .89+((i*11)%7)/100 : .1+((i*13)%10)/100
+    ctx.fillStyle = i%3 ? '#263d33' : '#476454'
+    ctx.beginPath()
+    ctx.arc(x*width,y*height,5+(i%5)*2,0,2*Math.PI)
+    ctx.fill()
+  }
+}
+new ResizeObserver(drawMap).observe(canvas.parentElement)
+drawMap()
+const action = byId('action')
+const target = byId('target')
+const drone = byId('drone')
+const thermal = byId('thermal')
+let selectedId
+let busy = false
+for (const id of Object.keys(zones)) {
+  const marker = byId(id)
+  marker.style.left = zones[id].x + '%'
+  marker.style.top = zones[id].y + '%'
+  marker.addEventListener('click', () => {
+    selectedId = id
+    const zone = zones[id]
+    for (const key of Object.keys(zones)) byId(key).setAttribute('aria-pressed', String(key === id))
+    byId('zone').textContent = zone.label + ' · ' + zone.type
+    byId('forecast').textContent = 'Forecast · ' + zone.forecast
+    byId('forecast').hidden = false
+    byId('details').textContent = zone.description
+    action.textContent = 'Dispatch drone'
+    action.hidden = false
+  })
+}
+const wait = ms => new Promise(resolve => setTimeout(resolve,ms))
+action.addEventListener('click', async () => {
+  if (busy) return
+  busy = true
+  action.disabled = true
+  const missionId = selectedId
+  const zone = zones[missionId]
+  const label = zone.label
+  for (const id of Object.keys(zones)) byId(id).disabled = true
+  thermal.hidden = true
+  target.hidden = false
+  target.textContent = 'Drone en route to ' + label
+  drone.style.left = zone.x + '%'
+  drone.style.top = (zone.y - 11) + '%'
+  await wait(2000)
+  target.textContent = 'Scanning ' + label + ' with thermal camera'
+  await wait(900)
+  byId('thermal-title').textContent = label + ' · Simulated thermal scan'
+  byId('report').textContent = zone.report
+  const heatmap = byId('heatmap')
+  heatmap.style.setProperty('--hotspot',zone.hotspot)
+  heatmap.setAttribute('aria-label',zone.report)
+  heatmap.className = zone.heat
+  thermal.hidden = false
+  target.textContent = 'Thermal scan complete · ' + label
+  busy = false
+  action.disabled = false
+  for (const id of Object.keys(zones)) byId(id).disabled = false
+})
+const camera = byId('camera')
+const feed = byId('feed')
+let stream
+function stopCamera() {
+  stream?.getTracks().forEach(track => track.stop())
+  stream = undefined
+  feed.srcObject = null
+  feed.hidden = true
+  drone.hidden = false
+  byId('scene').hidden = false
+  drawMap()
+  camera.textContent = 'Use live camera'
+  byId('status').textContent = 'Bird’s-eye forecast · Select a zone to investigate.'
+}
+camera.addEventListener('click', async () => {
+  if (stream) {
+    stopCamera()
+    return
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    byId('status').textContent = 'Camera access requires HTTPS or localhost in a supported browser. The sample scene is available.'
+    return
+  }
+  camera.disabled = true
+  byId('status').textContent = 'Waiting for camera permission…'
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false})
+    feed.srcObject = stream
+    await feed.play()
+    feed.hidden = false
+    drone.hidden = true
+    byId('scene').hidden = true
+    camera.textContent = 'Use bird’s-eye view'
+    byId('status').textContent = 'Live camera · Simulated zones'
+  } catch {
+    stopCamera()
+    byId('status').textContent = 'Camera unavailable or permission denied. The sample scene is available.'
+  } finally {
+    camera.disabled = false
+  }
+})
+window.addEventListener('pagehide', stopCamera)
+</script>
+</body>
+</html>
